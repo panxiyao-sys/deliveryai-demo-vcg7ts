@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
-import type { RouteState, ViewName } from '@/types'
+import { useEffect, useRef } from 'react'
+import type { RouteState } from '@/types'
 import { projectsRoute } from '@/state/studioReducer'
 
 // 剧创平台两视图：工作台/项目列表（#/projects）与项目详情（#/project/:id）。
@@ -41,36 +41,51 @@ interface UseViewRouteOptions {
 
 /**
  * 保持当前路由与 URL hash 双向同步：
- * - 路由变化时写入对应 hash，使两视图拥有各自地址并生成历史记录。
- * - 监听 hashchange，响应浏览器前进/后退与手动改地址；非法/不可达地址 replaceState 纠正。
+ * - 路由变化时用 history.pushState 写入对应 hash（显式产生一条历史，支持前进/后退），
+ *   地址已是目标 hash 时跳过，避免重复历史条目；首次/非法地址用 replaceState 规范化。
+ * - 监听 hashchange/popstate，响应浏览器前进/后退与手动改地址；非法/不可达地址 replaceState 纠正。
+ *
+ * 用 ref 持有最新 projectExists/onNavigate，使订阅 effect 只在挂载时建立一次，
+ * 避免回调引用变化在 StrictMode 双挂载或数据就绪后重放首载纠正、污染历史栈。
  */
 export function useViewRoute(route: RouteState, { onNavigate, projectExists }: UseViewRouteOptions) {
-  // 路由 → hash
+  const projectExistsRef = useRef(projectExists)
+  const onNavigateRef = useRef(onNavigate)
+  const routeRef = useRef(route)
+  projectExistsRef.current = projectExists
+  onNavigateRef.current = onNavigate
+  routeRef.current = route
+
+  // 路由 → hash（首载规范化 + 后续 push）
   useEffect(() => {
     const target = routeToHash(route)
     if (window.location.hash === target) return
-    if (hashToRoute(window.location.hash, projectExists)) {
-      window.location.hash = target // 正常跳转：写入 hash 以生成一条历史记录，支持前进/后退
+    if (hashToRoute(window.location.hash, projectExistsRef.current)) {
+      window.history.pushState(null, '', target) // 正常跳转：生成一条历史记录，支持前进/后退
     } else {
-      window.history.replaceState(null, '', target) // 首次加载/非法地址：规范化，不额外新增历史记录
+      window.history.replaceState(null, '', target) // 首次加载/非法地址：规范化，不新增历史
     }
-  }, [route, projectExists])
+  }, [route])
 
-  // hash → 路由
+  // hash → 路由：仅在真实 hashchange/popstate 事件时响应，挂载时不主动纠正
   useEffect(() => {
     const handler = () => {
-      const requested = hashToRoute(window.location.hash, projectExists)
+      const current = routeRef.current
+      const requested = hashToRoute(window.location.hash, projectExistsRef.current)
       const target: RouteState = requested ?? projectsRoute
       if (!requested) {
         window.history.replaceState(null, '', routeToHash(target)) // 纠正非法/旧/失效地址
       }
-      if (target.view !== route.view || target.projectId !== route.projectId) {
-        onNavigate(target)
-      }
+      const sameRoute = target.view === current.view && target.projectId === current.projectId
+      // 重复导航到当前同一地址：路由状态不变，忽略即可（浏览器历史条目由其自身管理）。
+      if (sameRoute) return
+      onNavigateRef.current(target)
     }
     window.addEventListener('hashchange', handler)
-    return () => window.removeEventListener('hashchange', handler)
-  }, [route, onNavigate, projectExists])
+    window.addEventListener('popstate', handler)
+    return () => {
+      window.removeEventListener('hashchange', handler)
+      window.removeEventListener('popstate', handler)
+    }
+  }, [])
 }
-
-export type { ViewName }

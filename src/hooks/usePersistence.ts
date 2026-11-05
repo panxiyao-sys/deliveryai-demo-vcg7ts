@@ -13,7 +13,10 @@ export function bootstrapStorage(): Bootstrap {
 }
 
 function toEnvelope(state: AppState): StorageEnvelope {
-  return { version: 1, projects: state.projects, scenes: state.scenes }
+  // 仅持久化已成功保存过的场次：标题为空表示该场次尚停留在新增/未保存阶段（草稿不入库，
+  // REQ-006.5 校验失败不写入持久化层）。运行时仍保留该空场次以维持编辑现场，刷新后自然消失。
+  const scenes = state.scenes.filter((scene) => scene.title.trim().length > 0)
+  return { version: 1, projects: state.projects, scenes }
 }
 
 /**

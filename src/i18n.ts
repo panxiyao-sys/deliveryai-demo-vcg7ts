@@ -31,7 +31,7 @@ const resources = {
         dialog_title: '新建剧本项目',
         name_label: '项目名称',
         name_placeholder: '例如：破晓 · 第一集',
-        name_required: '项目名称不能为空，请输入名称。',
+        name_required: '项目名称为必填项，请输入项目名称。',
         create_success: '项目已创建',
       },
       project: {
@@ -49,7 +49,7 @@ const resources = {
       scene: {
         title_label: '场次标题',
         title_placeholder: '必填，例如：第一场 雨夜巷口',
-        title_required: '场次标题不能为空，请填写标题后再保存。',
+        title_required: '场次标题为必填项，请输入场次标题后再保存。',
         scene_label: '场景描述',
         scene_placeholder: '描述环境、氛围与镜头感（可留空）',
         location_label: '地点',
@@ -103,7 +103,7 @@ const resources = {
         dialog_title: 'New Script Project',
         name_label: 'Project name',
         name_placeholder: 'e.g. Daybreak · Episode 1',
-        name_required: 'Project name cannot be empty.',
+        name_required: 'Project name is required. Please enter a project name.',
         create_success: 'Project created',
       },
       project: {
@@ -121,7 +121,7 @@ const resources = {
       scene: {
         title_label: 'Scene title',
         title_placeholder: 'Required, e.g. Scene 1 — Rainy Alley',
-        title_required: 'Scene title cannot be empty. Add a title before saving.',
+        title_required: 'Scene title is required. Please enter a scene title before saving.',
         scene_label: 'Scene description',
         scene_placeholder: 'Describe the environment, mood and camera feel (optional)',
         location_label: 'Location',

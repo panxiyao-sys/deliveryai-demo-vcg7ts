@@ -1,65 +1,97 @@
-import { useCallback, useEffect, useReducer, useState } from 'react'
-import i18next from 'i18next'
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { ClipboardList, ConciergeBell, LayoutDashboard, Menu as MenuIcon, ShoppingBasket } from 'lucide-react'
-import { HomeView } from '@/components/HomeView'
-import { WelcomeView } from '@/components/WelcomeView'
-import { CartPanel } from '@/components/CartPanel'
-import { CheckoutView } from '@/components/CheckoutView'
-import { DemoConsole } from '@/components/DemoConsole'
-import { MenuView } from '@/components/MenuView'
-import { OrderView } from '@/components/OrderView'
-import { ServiceSheet } from '@/components/ServiceSheet'
+import { AlertTriangle } from 'lucide-react'
+import { ProjectsView } from '@/components/ProjectsView'
+import { ProjectDetailView } from '@/components/ProjectDetailView'
 import { TopBar } from '@/components/TopBar'
-import { Button } from '@/components/ui/button'
-import { Dialog, DialogContent } from '@/components/ui/dialog'
-import { useElderlyMode } from '@/hooks/useElderlyMode'
-import { initialViewFromHash, useViewRoute } from '@/hooks/useViewRoute'
-import { orderReducer, initialState } from '@/state/orderReducer'
-import { products } from '@/data/menu'
-import { money } from '@/lib/utils'
-import type { AppState, ViewName } from '@/types'
+import { ConfirmDiscardDialog } from '@/components/ConfirmDiscardDialog'
+import { usePersistence, bootstrapStorage } from '@/hooks/usePersistence'
+import { initialRouteFromHash, routeToHash, useViewRoute } from '@/hooks/useViewRoute'
+import { initialState, projectsRoute, studioReducer } from '@/state/studioReducer'
+import type { AppState, RouteState, SceneDraft, StorageMode } from '@/types'
 
 function createInitialState(): AppState {
-  const search = new URLSearchParams(window.location.search)
-  const requestedView = initialViewFromHash()
-
-  // preview=menu：预置一桌带购物车的点餐态，供设计/截图预览
-  if (search.get('preview') === 'menu') {
-    const product = products[2]
-    const spec = [i18next.t('menu.option.full'), i18next.t('menu.option.original')].join(' · ')
-    return {
-      ...initialState,
-      table: 'A08',
-      view: 'menu',
-      cart: [{ uid: 'preview-item', productId: product.id, name: i18next.t(product.name), price: product.price, quantity: 1, image: product.image, spec, orderedBy: '姚乾' }],
-      lastMessage: initialState.lastMessage,
-    }
+  const { envelope, mode } = bootstrapStorage()
+  const projects = envelope?.projects ?? []
+  const scenes = envelope?.scenes ?? []
+  const projectExists = (id: string) => projects.some((project) => project.id === id)
+  const requested = initialRouteFromHash(projectExists)
+  return {
+    ...initialState,
+    projects,
+    scenes,
+    storageMode: mode,
+    // 深链接命中现有项目则直达详情，否则（非法/旧 hash/失效 id）回落工作台。
+    route: requested ?? projectsRoute,
   }
-
-  // 深链接：直接以 #/welcome 等地址打开时，先绑定示例桌台再进入对应视图；
-  // home 无需桌台，其余流程视图（welcome/menu/order/checkout）需要桌台上下文。
-  if (requestedView && requestedView !== 'home') {
-    return { ...initialState, table: 'A08', view: requestedView }
-  }
-
-  return initialState
 }
 
 export default function App() {
   const { t, i18n } = useTranslation()
-  const [state, dispatch] = useReducer(orderReducer, undefined, createInitialState)
-  const { enabled: elderly, toggle: toggleElderly } = useElderlyMode()
-  const [serviceOpen, setServiceOpen] = useState(false)
-  const [consoleOpen, setConsoleOpen] = useState(false)
-  const [cartOpen, setCartOpen] = useState(false)
-  const cartTotal = state.cart.reduce((sum, item) => sum + item.price * item.quantity, 0)
-  const waitingServices = state.services.filter((service) => service.status === 'waiting').length
+  const [state, dispatch] = useReducer(studioReducer, undefined, createInitialState)
 
-  // 视图 ↔ URL hash 双向同步；未绑定桌台时只有 home 可达，其余地址回落到 home
-  const canView = useCallback((view: ViewName) => view === 'home' || !!state.table, [state.table])
-  const navigate = useCallback((view: ViewName) => dispatch({ type: 'SET_VIEW', view }), [])
-  useViewRoute(state.view, { onNavigate: navigate, canView })
+  // 各场次未保存脏态（草稿仅存于编辑器，这里只保留脏标记，供守卫与列表标记使用）。
+  const [dirtyMap, setDirtyMap] = useState<Record<string, boolean>>({})
+  const [guardOpen, setGuardOpen] = useState(false)
+  const pendingActionRef = useRef<(() => void) | null>(null)
+
+  const projectExists = useCallback(
+    (id: string) => state.projects.some((project) => project.id === id),
+    [state.projects],
+  )
+
+  const handleModeChange = useCallback((mode: StorageMode) => {
+    dispatch({ type: 'SET_STORAGE_MODE', mode })
+  }, [])
+
+  // 已提交数据变化即持久化；写入失败自动降级 memory。
+  usePersistence(state, handleModeChange)
+
+  // 统一导航守卫：无脏态直接执行；有脏态挂起动作并弹确认。
+  const runGuarded = useCallback((action: () => void) => {
+    const hasDirty = Object.values(dirtyMap).some(Boolean)
+    if (!hasDirty) {
+      action()
+      return
+    }
+    pendingActionRef.current = action
+    setGuardOpen(true)
+  }, [dirtyMap])
+
+  // hash 驱动的导航（浏览器前进/后退/手动改地址）；非法/旧/失效地址已在 hook 内纠正为 projects。
+  const handleHashNavigate = useCallback((route: RouteState) => {
+    runGuarded(() => dispatch({ type: 'NAVIGATE', route }))
+  }, [runGuarded])
+  useViewRoute(state.route, { onNavigate: handleHashNavigate, projectExists })
+
+  // 「留下继续编辑」：取消挂起导航，并把 hash 回写为当前路由，保证地址与保留视图一致。
+  const handleStay = useCallback(() => {
+    pendingActionRef.current = null
+    setGuardOpen(false)
+    if (typeof window !== 'undefined' && window.location.hash !== routeToHash(state.route)) {
+      window.history.replaceState(null, '', routeToHash(state.route))
+    }
+  }, [state.route])
+
+  // 「放弃更改并离开」：丢弃草稿（不保存），执行挂起导航；清掉相关脏标记。
+  const handleDiscard = useCallback(() => {
+    const action = pendingActionRef.current
+    pendingActionRef.current = null
+    setGuardOpen(false)
+    setDirtyMap({})
+    action?.()
+  }, [])
+
+  // 全局轻提示（如“已保存”）：展示后自动消失。
+  const messageTimer = useRef<number | null>(null)
+  const notify = useCallback((message: string) => {
+    dispatch({ type: 'SET_MESSAGE', message })
+    if (messageTimer.current) window.clearTimeout(messageTimer.current)
+    messageTimer.current = window.setTimeout(() => dispatch({ type: 'SET_MESSAGE', message: '' }), 2200)
+  }, [])
+  useEffect(() => () => {
+    if (messageTimer.current) window.clearTimeout(messageTimer.current)
+  }, [])
 
   useEffect(() => {
     document.documentElement.lang = i18n.language === 'zh' ? 'zh-CN' : 'en'
@@ -73,120 +105,118 @@ export default function App() {
     }
   }, [i18n.language, t])
 
-  const changeView = (view: ViewName) => dispatch({ type: 'SET_VIEW', view })
-  const submitOrder = () => {
-    dispatch({ type: 'SUBMIT_ORDER' })
-    setCartOpen(false)
-  }
   const toggleLanguage = () => {
     i18n.changeLanguage(i18n.language === 'zh' ? 'en' : 'zh')
   }
-  const handleToggleElderly = () => {
-    toggleElderly()
-    dispatch({ type: 'SET_MESSAGE', message: elderly ? '已切换为常规模式' : '已切换为老人模式' })
+
+  const createProject = (name: string) => {
+    dispatch({ type: 'CREATE_PROJECT', name })
+    notify(t('projects.create_success'))
   }
 
-  if (state.view === 'home' || !state.table) {
-    return <HomeView onBind={(table) => dispatch({ type: 'BIND_TABLE', table })} />
+  const openProject = (projectId: string) => {
+    const target: RouteState = { view: 'project', projectId }
+    runGuarded(() => dispatch({ type: 'NAVIGATE', route: target }))
   }
 
-  if (state.view === 'welcome') {
-    return <WelcomeView table={state.table!} onEnter={() => dispatch({ type: 'SET_VIEW', view: 'menu' })} />
+  const addScene = () => {
+    if (state.route.projectId) dispatch({ type: 'ADD_SCENE', projectId: state.route.projectId })
   }
+
+  const guardSelectScene = (sceneId: string) => {
+    runGuarded(() => dispatch({ type: 'SELECT_SCENE', sceneId }))
+  }
+
+  const guardBack = () => {
+    runGuarded(() => dispatch({ type: 'NAVIGATE', route: projectsRoute }))
+  }
+
+  const saveScene = (sceneId: string, draft: SceneDraft): boolean => {
+    if (draft.title.trim().length === 0) return false
+    dispatch({ type: 'SAVE_SCENE', sceneId, patch: draft })
+    setDirtyMap((prev) => ({ ...prev, [sceneId]: false }))
+    notify(t('scene.saved_feedback'))
+    return true
+  }
+
+  const handleDirtyChange = useCallback((sceneId: string, dirty: boolean) => {
+    setDirtyMap((prev) => (prev[sceneId] === dirty ? prev : { ...prev, [sceneId]: dirty }))
+  }, [])
+
+  const activeProject = state.route.view === 'project'
+    ? state.projects.find((project) => project.id === state.route.projectId) ?? null
+    : null
+
+  const projectScenes = useMemo(() => {
+    if (!activeProject) return []
+    return state.scenes
+      .filter((scene) => scene.projectId === activeProject.id)
+      .sort((a, b) => a.order - b.order)
+  }, [activeProject, state.scenes])
+
+  // currentSceneId 是运行时 UI 状态、不入库；刷新/深链接进入详情后可能为空，
+  // 此时默认选中本项目第一个场次，保证编辑区有内容回显（REQ-005.4 / REQ-006.2）。
+  const effectiveCurrentSceneId = useMemo(() => {
+    if (projectScenes.length === 0) return null
+    const hit = projectScenes.some((scene) => scene.id === state.currentSceneId)
+    return hit ? state.currentSceneId : projectScenes[0].id
+  }, [projectScenes, state.currentSceneId])
+
+  const dirtySceneIds = useMemo(
+    () => new Set(Object.keys(dirtyMap).filter((id) => dirtyMap[id])),
+    [dirtyMap],
+  )
 
   return (
     <div className="min-h-screen bg-rice-100 paper-noise">
-      <TopBar
-        table={state.table}
-        view={state.view}
-        serviceCount={waitingServices}
-        language={i18n.language}
-        elderly={elderly}
-        onToggleLanguage={toggleLanguage}
-        onToggleElderly={handleToggleElderly}
-        onView={changeView}
-        onService={() => setServiceOpen(true)}
-        onConsole={() => setConsoleOpen(true)}
-      />
+      <TopBar language={i18n.language} onToggleLanguage={toggleLanguage} />
 
-      {state.view === 'menu' && (
-        <main className="mx-auto grid max-w-7xl gap-6 px-4 py-5 pb-28 lg:grid-cols-3 lg:px-6 lg:py-7 lg:pb-8">
-          <div className="lg:col-span-2">
-            <MenuView diners={state.diners} soldOut={state.soldOut} onAdd={(item) => dispatch({ type: 'ADD_CART', item })} />
-          </div>
-          <aside className="hidden lg:block">
-            <div className="sticky top-28">
-              <CartPanel items={state.cart} onQuantity={(uid, delta) => dispatch({ type: 'CHANGE_QTY', uid, delta })} onSubmit={submitOrder} />
-              <div className="mt-4 rounded-2xl border border-amber-400/30 bg-amber-100/70 p-4 text-sm text-charcoal-700">
-                <p className="font-bold">{t('common.collab_title')}</p>
-                <p className="mt-1 leading-6 text-charcoal-500">{t('common.collab_desc')}</p>
-              </div>
-            </div>
-          </aside>
-        </main>
+      {state.storageMode === 'memory' && (
+        <div
+          role="status"
+          aria-label={t('storage.memory_aria')}
+          className="flex items-start gap-2 border-b border-amber-400/40 bg-amber-100 px-4 py-2.5 text-sm font-medium text-charcoal-700 lg:px-6"
+        >
+          <AlertTriangle size={17} className="mt-0.5 shrink-0 text-amber-500" />
+          <span>{t('storage.memory_banner')}</span>
+        </div>
       )}
 
-      {state.view === 'order' && (
-        <OrderView
-          items={state.orderItems}
-          stage={state.orderStage}
-          onAddMore={() => changeView('menu')}
-          onCancel={(uid) => dispatch({ type: 'REQUEST_CANCEL', uid })}
-          onCheckout={() => changeView('checkout')}
+      {state.route.view === 'projects' || !activeProject ? (
+        <ProjectsView
+          projects={state.projects}
+          scenes={state.scenes}
+          onCreateProject={createProject}
+          onOpenProject={openProject}
+        />
+      ) : (
+        <ProjectDetailView
+          project={activeProject}
+          scenes={projectScenes}
+          currentSceneId={effectiveCurrentSceneId}
+          onAddScene={addScene}
+          onSaveScene={saveScene}
+          guardSelectScene={guardSelectScene}
+          guardBack={guardBack}
+          onDirtyChange={handleDirtyChange}
+          dirtySceneIds={dirtySceneIds}
         />
       )}
 
-      {state.view === 'checkout' && (
-        <CheckoutView items={state.orderItems} paid={state.paid} onPay={() => dispatch({ type: 'PAY' })} onBack={() => changeView('order')} />
-      )}
-
-      <ServiceSheet open={serviceOpen} requests={state.services} onOpenChange={setServiceOpen} onCall={(service) => dispatch({ type: 'CALL_SERVICE', service })} />
-      <DemoConsole
-        open={consoleOpen}
-        table={state.table}
-        stage={state.orderStage}
-        soldOut={state.soldOut}
-        services={state.services}
-        onOpenChange={setConsoleOpen}
-        onStage={(stage) => dispatch({ type: 'SET_STAGE', stage })}
-        onSoldOut={(productId) => dispatch({ type: 'TOGGLE_SOLD_OUT', productId })}
-        onRespond={() => dispatch({ type: 'RESPOND_SERVICES' })}
-        onReset={() => { dispatch({ type: 'RESET' }); setConsoleOpen(false) }}
+      <ConfirmDiscardDialog
+        open={guardOpen}
+        onOpenChange={(open) => {
+          if (!open) handleStay()
+        }}
+        onStay={handleStay}
+        onDiscard={handleDiscard}
       />
 
-      <Dialog open={cartOpen} onOpenChange={setCartOpen}>
-        <DialogContent title={t('cart.dialog_title')}>
-          <div className="mt-5"><CartPanel compact items={state.cart} onQuantity={(uid, delta) => dispatch({ type: 'CHANGE_QTY', uid, delta })} onSubmit={submitOrder} /></div>
-        </DialogContent>
-      </Dialog>
-
-      <div className="fixed bottom-20 left-1/2 z-30 -translate-x-1/2 lg:hidden">
-        {state.view === 'menu' && state.cart.length > 0 && (
-          <Button onClick={() => setCartOpen(true)} className="h-12 rounded-full px-5 shadow-float">
-            <span className="relative"><ShoppingBasket size={19} /><span className="absolute -right-2 -top-2 flex h-4 min-w-4 items-center justify-center rounded-full bg-amber-400 px-1 text-xs text-charcoal-900">{state.cart.length}</span></span>
-            {t('common.view_cart')} · {money(cartTotal)}
-          </Button>
-        )}
-      </div>
-
-      <nav className="safe-bottom fixed bottom-0 left-0 right-0 z-30 grid grid-cols-4 border-t border-charcoal-900/5 bg-white/95 px-2 pt-2 backdrop-blur lg:hidden">
-        <MobileNav active={state.view === 'menu'} icon={MenuIcon} label={t('common.nav_menu')} onClick={() => changeView('menu')} />
-        <MobileNav active={state.view === 'order'} icon={ClipboardList} label={t('common.nav_order')} onClick={() => changeView('order')} />
-        <MobileNav active={serviceOpen} icon={ConciergeBell} label={t('common.nav_service')} badge={waitingServices} onClick={() => setServiceOpen(true)} />
-        <MobileNav active={consoleOpen} icon={LayoutDashboard} label={t('common.nav_demo')} onClick={() => setConsoleOpen(true)} />
-      </nav>
-
-      <div className="pointer-events-none fixed left-1/2 top-24 z-40 -translate-x-1/2 rounded-full bg-charcoal-900/90 px-4 py-2 text-xs font-semibold text-white shadow-float">
-        {state.lastMessage}
-      </div>
+      {state.lastMessage && (
+        <div className="pointer-events-none fixed left-1/2 top-20 z-40 -translate-x-1/2 rounded-full bg-charcoal-900/90 px-4 py-2 text-xs font-semibold text-white shadow-float">
+          {state.lastMessage}
+        </div>
+      )}
     </div>
-  )
-}
-
-function MobileNav({ active, icon: Icon, label, badge, onClick }: { active: boolean; icon: typeof MenuIcon; label: string; badge?: number; onClick: () => void }) {
-  return (
-    <button onClick={onClick} className={`relative flex flex-col items-center gap-1 rounded-xl py-2 text-xs font-semibold transition ${active ? 'bg-chili-50 text-chili-500' : 'text-charcoal-500'}`}>
-      <Icon size={20} />{label}{badge ? <span className="absolute right-4 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-chili-500 px-1 text-white">{badge}</span> : null}
-    </button>
   )
 }

@@ -5,8 +5,6 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-export const money = (value: number) => `¥${value.toFixed(2)}`
-
 // crypto.randomUUID 仅在安全上下文（https / localhost）可用；
 // 通过局域网 IP 或 file:// 打开时它是 undefined，直接调用会抛错。
 // 演示为纯前端应用，需在任意来源下都能生成唯一 id，故降级为 Math.random 方案。
